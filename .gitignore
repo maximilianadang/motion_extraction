@@ -1,0 +1,15 @@
+# uv / virtualenv
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Generated motion-extraction outputs
+*_motion.mp4
+
+# Source media (large binaries — keep out of git history).
+# Remove these lines or use git-lfs if you want sample media tracked.
+*.MOV
+*.mov
+*.mp4
