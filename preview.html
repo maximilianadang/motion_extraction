@@ -1,0 +1,23 @@
+<!doctype html>
+<!--
+  Watch a motion-extraction output inside VS Code.
+
+  Easiest path: install Microsoft's "Live Preview" extension, then click the
+  "Show Preview" button on this file (or right-click -> "Show Preview"). Live
+  Preview serves the folder over localhost so the <video> below plays.
+
+  Change the src below if your output file has a different name.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Motion extraction preview</title>
+    <style>
+      body { margin: 0; background: #111; display: grid; place-items: center; height: 100vh; }
+      video { max-width: 100vw; max-height: 100vh; }
+    </style>
+  </head>
+  <body>
+    <video src="IMG_6476_motion.mp4" controls autoplay loop muted></video>
+  </body>
+</html>

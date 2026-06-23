@@ -15,6 +15,11 @@ leaves a visible edge. The **time `delay`** is what reveals motion — with
 `delay = 0` every pixel cancels against its own inverse and the whole frame goes
 flat gray.
 
+Frames are decoded with OpenCV and encoded as **H.264 (yuv420p)** by FFmpeg, so
+the output plays anywhere Chromium does — browsers and VS Code video-preview
+extensions. The FFmpeg binary is the static one bundled with `imageio-ffmpeg`,
+so no system FFmpeg (and no `sudo`) is needed.
+
 ## Setup
 
 Dependencies are managed with [uv](https://docs.astral.sh/uv/):
@@ -35,11 +40,23 @@ uv run motion_extraction.py IMG_6476.MOV out.mp4 --delay 2 --alpha 0.5
 
 Options:
 
-| flag            | default | meaning                                                        |
-| --------------- | ------- | -------------------------------------------------------------- |
-| `-d`, `--delay` | `1`     | frame offset between original and inverted copy (`0` = gray)   |
-| `-a`, `--alpha` | `0.5`   | opacity of the inverted overlay (0..1)                         |
-| `--fourcc`      | `mp4v`  | output codec FourCC                                            |
+| flag             | default  | meaning                                                       |
+| ---------------- | -------- | ------------------------------------------------------------- |
+| `-d`, `--delay`  | `1`      | frame offset between original and inverted copy (`0` = gray)  |
+| `-a`, `--alpha`  | `0.5`    | opacity of the inverted overlay (0..1)                        |
+| `--crf`          | `18`     | H.264 quality, `0`=lossless .. `51`=worst                     |
+| `--preset`       | `medium` | x264 speed/efficiency preset                                  |
+
+## Watching the result in VS Code
+
+VS Code can't play video in a normal editor tab, so use one of:
+
+- **A video-preview extension** — install one from the Marketplace (search
+  "mp4" / "Video Preview") and open the `*_motion.mp4` file. The output is H.264,
+  which these extensions can decode.
+- **Live Preview** (Microsoft extension) — open `preview.html` and click
+  *Show Preview*. It serves the folder over `localhost` so the embedded `<video>`
+  plays. Edit the `src` in `preview.html` if your output has a different name.
 
 ## Notes
 

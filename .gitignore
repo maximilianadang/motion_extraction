@@ -1,15 +1,64 @@
-# uv / virtualenv
-.venv/
-
-# Python
+# ---- Python ----
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
 
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test / type / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# ---- uv / virtualenv ----
+.venv/
+venv/
+env/
+# Note: uv.lock and .python-version are intentionally tracked (committed).
+
+# ---- Environment / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- Editor / IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- OS cruft ----
+.DS_Store
+Thumbs.db
+
+# ---- Claude Code (personal/local config) ----
+.claude/settings.local.json
+# (a shared .claude/settings.json, if added, stays trackable)
+
+# ---- Project media (large binaries — keep out of git history) ----
 # Generated motion-extraction outputs
 *_motion.mp4
 
-# Source media (large binaries — keep out of git history).
-# Remove these lines or use git-lfs if you want sample media tracked.
-*.MOV
+# Source / output video (remove these or use git-lfs to track sample media)
 *.mov
+*.MOV
 *.mp4
+*.m4v
+*.avi
+*.mkv
+*.webm
+
+# Extracted / intermediate frame dumps
+frames/
+out/
+output/
