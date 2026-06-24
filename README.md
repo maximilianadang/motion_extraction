@@ -62,3 +62,18 @@ VS Code can't play video in a normal editor tab, so use one of:
 
 - OpenCV does not copy the audio track; the output is video-only.
 - A larger `--delay` produces longer motion trails.
+
+## Volumetric plume extraction
+
+`volumetric_extraction.py` is a separate, CPU-only tool that turns a single
+"in the wild" plume video into a **3D volumetric prior** (centerline + σ(s) +
+relative concentration, plus a voxel grid) aligned with the simulated-lidar /
+Gaussian-plume dispersion model in `adrian_experiment/Earth_Field_OpenArea_Model.py`.
+
+```bash
+uv run volumetric_extraction.py IMG_6476.MOV --source-xy 0.34 0.55 --source-width-m 1.0
+```
+
+Outputs land in `out/volumetric/` (`volume_density.npy`, `plume_profile.csv`,
+`volume_meta.json`, previews). See `docs/volumetric-pipeline.md` for the method,
+output schema, how it feeds the dispersion model, and its assumptions/limits.
