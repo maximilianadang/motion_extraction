@@ -24,15 +24,15 @@ sanity check (source at nozzle, plume downwind); they differ in *quality*.
 
 | method | corr ↑ | IoU ↑ | rough ↓ | verdict |
 |---|---|---|---|---|
-| **baseline** | 0.729 | 0.251 | 0.091 | reference |
-| **smooth** (steady-plume) | 0.725 | **0.254** | **0.062** | **adopted** |
-| continuity (flow mass-cons.) | 0.646 | 0.226 | 0.103 | rejected |
-| beer_lambert (optical depth) | 0.577 | 0.041 | 0.075 | rejected |
+| **baseline** | 0.724 | 0.249 | 0.090 | reference |
+| **smooth** (steady-plume) | 0.720 | **0.251** | **0.062** | **adopted** |
+| continuity (flow mass-cons.) | 0.644 | 0.225 | 0.103 | rejected |
+| beer_lambert (optical depth) | 0.570 | 0.039 | 0.074 | rejected |
 
 ## What we learned (intuition + overlays, not just numbers)
 
 - **Steady-plume smoothing wins.** Smoothing the column-density and width profiles
-  cut banding by a third (0.091→0.062) at *no* cost to data fit. A steady mean
+  cut banding by a third (0.090→0.062) at *no* cost to data fit. A steady mean
   plume genuinely varies smoothly downwind, so this is principled, not cosmetic.
   **Composed into the final deliverable.**
 - **Beer–Lambert opacity fails — and the overlay shows why.** It collapsed to a
@@ -53,12 +53,27 @@ prior — now with smoother, more physical density and a measured velocity field
 True depth still requires angular diversity (a second camera) or a full
 transport-tomography optimization over the time sequence (GPU-scale).
 
+## Visualization limit: GIF overlays are not full smoke masks
+The time-evolution GIFs visualize **detected brightness-excess opacity**, not
+every RGB-visible smoke pixel. Diffuse white plume can appear without overlay
+where it is low contrast against the bright sky, shaded/gray rather than brighter
+than the pre-release background, outside the mean plume mask, below the opacity
+display threshold, or persistent enough that the short temporal window gives it
+weak contrast. Treat missing overlay on visible smoke as a limitation of the
+single-view detection/rendering heuristic, not as evidence that those regions are
+absent from the plume.
+
 ## Deliverable
 `out/volumetric_v2/`: smoothed `volume_density.npy`, `plume_profile.csv`,
 `velocity_profile.csv`, `reproject_overlay.png` (the sanity check on the frame),
-and `render_volume*.png`. Regenerate with:
+`render_volume*.png`, `plume_evolution.gif` (release-window image-plane opacity
+over time), and `plume_volume_3d_time.gif` (fixed-camera 3D isometric
+time-series volume). `out/ab/` contains `reproj_*.png` plus `metrics.csv` for
+the method comparison. Regenerate with:
 
 ```bash
 uv run volumetric_v2.py IMG_6476.MOV --finalize     # adopted method
 uv run volumetric_v2.py IMG_6476.MOV --method all   # re-run the A/B
+uv run volumetric_v2.py IMG_6476.MOV --animate      # plume evolution GIF
+uv run volumetric_v2.py IMG_6476.MOV --animate-3d-time  # fixed-camera 3D time GIF
 ```

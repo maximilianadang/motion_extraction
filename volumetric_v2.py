@@ -19,6 +19,7 @@ Each run produces a re-projection overlay on the real frame and match metrics
 from __future__ import annotations
 
 import argparse
+import io
 import pathlib
 
 import cv2
@@ -120,6 +121,282 @@ def overlay_on_frame(raster, color_frame, out_path, label=""):
         cv2.putText(blend, label, (20, 44), cv2.FONT_HERSHEY_SIMPLEX, 1.2,
                     (255, 255, 255), 3, cv2.LINE_AA)
     cv2.imwrite(str(out_path), blend)
+
+
+# ----------------------------------------------------------------------------
+# Time evolution GIF: observed instantaneous plume opacity over the release
+# ----------------------------------------------------------------------------
+def _read_color_frame(video, frame_idx):
+    cap = cv2.VideoCapture(str(video))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+    ok, frame = cap.read()
+    cap.release()
+    if not ok:
+        raise RuntimeError(f"could not read video frame {frame_idx}")
+    return frame
+
+
+def _draw_text(img, text, org, scale=0.7):
+    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                (0, 0, 0), 4, cv2.LINE_AA)
+    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                (255, 255, 255), 1, cv2.LINE_AA)
+
+
+def _fit_width(img, max_width):
+    if max_width <= 0 or img.shape[1] <= max_width:
+        return img
+    scale = max_width / img.shape[1]
+    return cv2.resize(img, (max_width, int(round(img.shape[0] * scale))),
+                      interpolation=cv2.INTER_AREA)
+
+
+def plume_evolution_gif(video, out_path="out/volumetric_v2/plume_evolution.gif",
+                        source_xy=(0.34, 0.55), max_frames=150, downscale=0.5,
+                        gif_frames=48, window=5, width=960):
+    """Animate the plume through time using the same release-windowed opacity
+    front-end as the v2 reconstruction.
+
+    This is intentionally an observed opacity evolution, not a claim of new depth
+    information: each GIF frame is a short-window smoke brightness excess overlay
+    on the corresponding RGB frame.
+    """
+    from PIL import Image
+
+    frames, fps, idxs = ve.sample_frames(pathlib.Path(video), max_frames, downscale)
+    mean_op, bg, _nrel, _ntot, t0, t1 = ve.plume_opacity(frames, bright=True)
+    release = np.clip(frames[t0:t1 + 1] - bg[None], 0.0, None)
+    norm = max(float(np.percentile(release.mean(axis=0), 99.5)), 1e-6)
+    try:
+        plume_mask = ve.segment_plume(mean_op, 0.08).astype(np.uint8)
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
+        plume_mask = cv2.dilate(plume_mask, k).astype(np.float32)
+    except SystemExit:
+        plume_mask = np.ones_like(mean_op, dtype=np.float32)
+
+    active = np.arange(t0, t1 + 1)
+    if gif_frames > 0 and len(active) > gif_frames:
+        active = np.unique(np.linspace(t0, t1, gif_frames).round().astype(int))
+    half = max(0, int(window) // 2)
+
+    pil_frames = []
+    sampled_orig = idxs[active]
+    if len(sampled_orig) > 1:
+        duration_ms = int(np.clip(1000.0 * np.median(np.diff(sampled_orig)) / fps, 40, 250))
+    else:
+        duration_ms = 100
+
+    for j, k in enumerate(active):
+        lo, hi = max(t0, k - half), min(t1, k + half) + 1
+        opacity = np.clip(np.clip(frames[lo:hi] - bg[None], 0.0, None).mean(axis=0) / norm,
+                          0.0, 1.0)
+        opacity = np.where(opacity >= 0.04, opacity * plume_mask, 0.0)
+        color = _read_color_frame(video, idxs[k])
+        big = cv2.resize(opacity, (color.shape[1], color.shape[0]), interpolation=cv2.INTER_LINEAR)
+        heat = cv2.applyColorMap((big * 255).astype(np.uint8), cv2.COLORMAP_INFERNO)
+        alpha = np.clip(big * 1.35, 0.0, 0.7)[..., None]
+        blend = (color * (1 - alpha) + heat * alpha).astype(np.uint8)
+
+        sx, sy = blend.shape[1], blend.shape[0]
+        cv2.circle(blend, (int(source_xy[0] * sx), int(source_xy[1] * sy)),
+                   max(4, sx // 180), (0, 255, 0), -1, cv2.LINE_AA)
+        t_seconds = float(idxs[k]) / fps
+        _draw_text(blend, f"plume evolution  frame {int(idxs[k])}  t={t_seconds:.2f}s",
+                   (18, 34), 0.72)
+
+        y = sy - 18
+        cv2.line(blend, (18, y), (sx - 18, y), (245, 245, 245), 2, cv2.LINE_AA)
+        x = int(18 + (sx - 36) * (j / max(len(active) - 1, 1)))
+        cv2.circle(blend, (x, y), 5, (0, 255, 255), -1, cv2.LINE_AA)
+
+        blend = _fit_width(blend, width)
+        pil_frames.append(Image.fromarray(cv2.cvtColor(blend, cv2.COLOR_BGR2RGB)))
+
+    out = pathlib.Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pil_frames[0].save(out, save_all=True, append_images=pil_frames[1:],
+                       duration=duration_ms, loop=0, optimize=True)
+    print(f"wrote {out} ({len(pil_frames)} frames, {duration_ms} ms/frame)")
+    return out
+
+
+def _fixed_axis_profiles(opacity, ctx, sample_radius_px, n_offsets=129):
+    """Measure instantaneous transverse profiles on the mean plume centerline."""
+    offsets = np.linspace(-sample_radius_px, sample_radius_px, n_offsets).astype(np.float32)
+    xs = ctx["ix"][:, None] + offsets[None, :] * ctx["perp"][0]
+    ys = ctx["iy"][:, None] + offsets[None, :] * ctx["perp"][1]
+    vals = cv2.remap(opacity.astype(np.float32), xs.astype(np.float32), ys.astype(np.float32),
+                     cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
+    vals = np.where(vals >= 0.035, vals, 0.0)
+
+    line = np.trapezoid(vals, offsets, axis=1)
+    mass = np.maximum(vals.sum(axis=1), 1e-9)
+    center = (vals * offsets[None, :]).sum(axis=1) / mass
+    var = (vals * (offsets[None, :] - center[:, None]) ** 2).sum(axis=1) / mass
+    sig = np.sqrt(np.maximum(var, 1e-6))
+
+    weak = line <= 0.01 * max(float(line.max()), 1e-9)
+    sig = np.where(weak, ctx["sig"], sig)
+    center = np.where(weak, 0.0, center)
+    return line, sig, center
+
+
+def _volume_from_profiles(s_px, sigma_px, line_px, scale_m_per_px, n_perp, radius_m):
+    """Axisymmetric Gaussian lift without per-frame normalization."""
+    s_m = s_px * scale_m_per_px
+    sigma_m = np.maximum(sigma_px * scale_m_per_px, 1e-6)
+    a = np.linspace(-radius_m, radius_m, n_perp)
+    b = np.linspace(-radius_m, radius_m, n_perp)
+    A, B = np.meshgrid(a, b, indexing="ij")
+    rr = A * A + B * B
+    rho_peak = line_px / (2.0 * np.pi * np.maximum(sigma_px, 1e-6) ** 2)
+
+    vol = np.empty((len(s_m), n_perp, n_perp), dtype=np.float32)
+    for i in range(len(s_m)):
+        vol[i] = (rho_peak[i] * np.exp(-rr / (2.0 * sigma_m[i] ** 2))).astype(np.float32)
+    return vol, a, b
+
+
+def _sample_points_for_volume(vol, cx, cz, a, b, threshold, max_points, rng):
+    ii, ja, jb = np.where(vol > threshold)
+    if len(ii) == 0:
+        ii, ja, jb = np.where(vol > max(float(vol.max()) * 0.2, 1e-9))
+    if len(ii) == 0:
+        return None
+    dens = vol[ii, ja, jb]
+    if max_points > 0 and len(ii) > max_points:
+        sub = rng.choice(len(ii), max_points, replace=False)
+        ii, ja, jb, dens = ii[sub], ja[sub], jb[sub], dens[sub]
+    return cx[ii], a[ja], cz[ii] + b[jb], dens
+
+
+def plume_volume_timeseries_gif(video,
+                                out_path="out/volumetric_v2/plume_volume_3d_time.gif",
+                                source_xy=(0.34, 0.55), max_frames=220, downscale=0.5,
+                                gif_frames=40, window=5, width=960,
+                                grid_perp=72, max_points=26000):
+    """Fixed-camera isometric 3D GIF of the reconstructed plume over time.
+
+    Each frame is a short-window single-view axisymmetric lift from the observed
+    video opacity. The camera is fixed; the plume density and envelope change
+    through the release window.
+    """
+    from PIL import Image
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ctx = extract_frontend(video, max_frames=max_frames, downscale=downscale,
+                           source_xy=source_xy, opacity_mode="excess")
+    frames, bg, idxs, fps = ctx["frames"], ctx["bg"], ctx["idxs"], ctx["fps"]
+    t0, t1 = ctx["window"]
+    mean_op = ctx["op_excess"]
+    try:
+        plume_mask = ve.segment_plume(mean_op, 0.08).astype(np.uint8)
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
+        plume_mask = cv2.dilate(plume_mask, k).astype(np.float32)
+    except SystemExit:
+        plume_mask = np.ones_like(mean_op, dtype=np.float32)
+
+    active = np.arange(t0, t1 + 1)
+    if gif_frames > 0 and len(active) > gif_frames:
+        active = np.unique(np.linspace(t0, t1, gif_frames).round().astype(int))
+    half = max(0, int(window) // 2)
+    release = np.clip(frames[t0:t1 + 1] - bg[None], 0.0, None)
+    norm = max(float(np.percentile(release.mean(axis=0), 99.5)), 1e-6)
+    sample_radius_px = max(10.0, 4.0 * float(np.percentile(ctx["sig"], 95)))
+
+    profile_frames = []
+    for k in active:
+        lo, hi = max(t0, k - half), min(t1, k + half) + 1
+        opacity = np.clip(np.clip(frames[lo:hi] - bg[None], 0.0, None).mean(axis=0) / norm,
+                          0.0, 1.0)
+        opacity *= plume_mask
+        line, sig, center = _fixed_axis_profiles(opacity, ctx, sample_radius_px)
+        line = _smooth(line, 5)
+        sig = np.maximum(_smooth(sig, 5), 0.35 * ctx["sig"])
+        center = _smooth(center, 5)
+        profile_frames.append((line, sig, center))
+
+    radius_m = 3.0 * max(float(np.max(ctx["sig"])), *(float(np.max(p[1])) for p in profile_frames))
+    radius_m *= ctx["scale"]
+
+    raw_vols = []
+    dyn_centers = []
+    global_max = 0.0
+    for line, sig, center in profile_frames:
+        vol, a_axis, b_axis = _volume_from_profiles(
+            ctx["s"], sig, line, ctx["scale"], grid_perp, radius_m)
+        raw_vols.append(vol)
+        global_max = max(global_max, float(vol.max()))
+        ix = ctx["ix"] + center * ctx["perp"][0]
+        iy = ctx["iy"] + center * ctx["perp"][1]
+        dyn_centers.append(ve.centerline_world(ix, iy, 0, ctx["scale"]))
+    global_max = max(global_max, 1e-9)
+
+    sampled_orig = idxs[active]
+    if len(sampled_orig) > 1:
+        duration_ms = int(np.clip(1000.0 * np.median(np.diff(sampled_orig)) / fps, 50, 220))
+    else:
+        duration_ms = 100
+
+    mean_x, mean_z = ve.centerline_world(ctx["ix"], ctx["iy"], 0, ctx["scale"])
+    all_x = np.concatenate([mean_x] + [c[0] for c in dyn_centers])
+    all_z = np.concatenate([mean_z] + [c[1] for c in dyn_centers])
+    xlim = (float(all_x.min() - 0.35), float(all_x.max() + 0.35))
+    ylim = (-radius_m, radius_m)
+    zlim = (float(all_z.min() - radius_m), float(all_z.max() + radius_m))
+
+    height = max(540, int(width * 0.62))
+    rng = np.random.default_rng(0)
+    images = []
+    for j, (vol, (cx, cz), orig_idx) in enumerate(zip(raw_vols, dyn_centers, sampled_orig)):
+        vn = vol / global_max
+        pts = _sample_points_for_volume(vn, cx, cz, a_axis, b_axis,
+                                        threshold=0.045, max_points=max_points, rng=rng)
+        fig = plt.figure(figsize=(width / 100.0, height / 100.0), dpi=100)
+        ax = fig.add_subplot(1, 1, 1, projection="3d")
+        fig.patch.set_facecolor("white")
+        ax.set_facecolor("white")
+        if pts is not None:
+            X, Y, Z, dens = pts
+            ax.scatter(X, Y, Z, c=dens, s=5, alpha=0.20, cmap="inferno",
+                       vmin=0.0, vmax=1.0, depthshade=True)
+        ax.plot(cx, np.zeros_like(cx), cz, color="black", lw=1.5, alpha=0.55)
+        ax.scatter([0.0], [0.0], [0.0], color="limegreen", s=34, depthshade=False)
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+        ax.set_zlim(*zlim)
+        px = xlim[1] - xlim[0]
+        py = ylim[1] - ylim[0]
+        pz = zlim[1] - zlim[0]
+        span = max(px, py, pz, 1e-3)
+        ax.set_box_aspect((px / span, py / span, pz / span))
+        ax.view_init(elev=35.264, azim=-45.0)
+        ax.set_xlabel("downwind x [m]")
+        ax.set_ylabel("crosswind [m]")
+        ax.set_zlabel("height [m]")
+        ax.set_title(f"3D plume time series  frame {int(orig_idx)}  t={float(orig_idx) / fps:.2f}s")
+        for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+            axis.pane.set_facecolor((1, 1, 1, 0.0))
+            axis.pane.set_edgecolor((0.75, 0.75, 0.75, 0.45))
+        ax.grid(True, alpha=0.25)
+        fig.tight_layout()
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=100)
+        plt.close(fig)
+        buf.seek(0)
+        frame = Image.open(buf).convert("RGB")
+        images.append(frame)
+
+    out = pathlib.Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    images[0].save(out, save_all=True, append_images=images[1:],
+                   duration=duration_ms, loop=0, optimize=True)
+    print(f"wrote {out} ({len(images)} frames, {width}x{height}, "
+          f"{duration_ms} ms/frame)")
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -334,6 +611,23 @@ def parse_args(argv=None):
     p.add_argument("--source-xy", type=float, nargs=2, default=[0.34, 0.55])
     p.add_argument("--finalize", action="store_true",
                    help="write the A/B-selected improved deliverable to out/volumetric_v2")
+    p.add_argument("--animate", action="store_true",
+                   help="write a release-window plume evolution GIF and exit "
+                        "(or pair with --finalize to write both)")
+    p.add_argument("--animate-3d-time", action="store_true",
+                   help="write a fixed-camera isometric 3D time-series GIF")
+    p.add_argument("--gif-out", default="out/volumetric_v2/plume_evolution.gif",
+                   help="GIF output path for --animate")
+    p.add_argument("--volume-gif-out", default="out/volumetric_v2/plume_volume_3d_time.gif",
+                   help="GIF output path for --animate-3d-time")
+    p.add_argument("--gif-frames", type=int, default=48,
+                   help="maximum animation frames sampled across the release window")
+    p.add_argument("--gif-window", type=int, default=5,
+                   help="short temporal averaging window, in sampled frames")
+    p.add_argument("--gif-width", type=int, default=960,
+                   help="maximum GIF width in pixels; <=0 keeps source width")
+    p.add_argument("--volume-gif-points", type=int, default=26000,
+                   help="maximum sampled points per 3D time-series frame")
     return p.parse_args(argv)
 
 
@@ -341,10 +635,39 @@ def main(argv=None):
     a = parse_args(argv)
     if a.finalize:
         finalize(a.input, "out/volumetric_v2", tuple(a.source_xy))
+        if a.animate:
+            plume_evolution_gif(a.input, a.gif_out, tuple(a.source_xy),
+                                gif_frames=a.gif_frames, window=a.gif_window,
+                                width=a.gif_width)
+        if a.animate_3d_time:
+            plume_volume_timeseries_gif(a.input, a.volume_gif_out, tuple(a.source_xy),
+                                        gif_frames=a.gif_frames, window=a.gif_window,
+                                        width=a.gif_width,
+                                        max_points=a.volume_gif_points)
+        return
+    if a.animate:
+        plume_evolution_gif(a.input, a.gif_out, tuple(a.source_xy),
+                            gif_frames=a.gif_frames, window=a.gif_window,
+                            width=a.gif_width)
+        return
+    if a.animate_3d_time:
+        plume_volume_timeseries_gif(a.input, a.volume_gif_out, tuple(a.source_xy),
+                                    gif_frames=a.gif_frames, window=a.gif_window,
+                                    width=a.gif_width,
+                                    max_points=a.volume_gif_points)
         return
     methods = list(METHODS) if a.method == "all" else [a.method]
     results = [run_method(a.input, m, a.out, tuple(a.source_xy)) for m in methods]
     if len(results) > 1:
+        out_dir = pathlib.Path(a.out)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with (out_dir / "metrics.csv").open("w") as fh:
+            fh.write("method,corr,iou,rough,n_s,n_a,n_b\n")
+            for r in results:
+                n_s, n_a, n_b = r["vol"].shape
+                fh.write(f"{r['method']},{r['corr']:.6f},{r['iou']:.6f},"
+                         f"{r['rough']:.6f},{n_s},{n_a},{n_b}\n")
+        print(f"\nwrote {out_dir / 'metrics.csv'}")
         print("\n=== A/B summary (corr/IoU = data fit ↑, rough = unphysical banding ↓) ===")
         for r in sorted(results, key=lambda d: -d["corr"]):
             print(f"  {r['method']:14s} corr={r['corr']:.3f}  IoU={r['iou']:.3f}  "
